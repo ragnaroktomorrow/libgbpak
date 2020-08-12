@@ -3,13 +3,16 @@
  *
  */
 
-#define GB_NORM		0x00
+#define GB_NORM		0x00 //no RAM/mapper
 #define GB_MBC1		0x01
 #define GB_MBC2		0x02
 #define GB_MMMO1	0x03
 #define GB_MBC3		0x04
-#define GB_MBC4		0x10 //test
+//#define GB_MBC30
+#define GB_MBC4		0x10 //doesn't actually exist
 #define GB_MBC5		0x05
+//#define GB_MBC6 ??
+//#define GB_MBC7 ??
 #define GB_CAMERA	0x06
 #define GB_TAMA5	0x07
 #define GB_HUC3		0x08
@@ -39,16 +42,22 @@ typedef struct {
 } cart;
 
 
-
+//externals
 int init_gbpak(void);
+int copy_gbRom_toRAM(uint8_t *rom_data, uint32_t *bankOffset, uint32_t size);
+int copy_gbRam_toRAM(uint8_t *ram_data);
+int copy_save_toGbRam(uint8_t *ram_data);
+int disable_gbRam(void);
+
+
+//internals
 int _get_gbPower(void);
+int _set_gbPower(int);
 int _get_gbAccessState(void);
+int _set_gbAccessState(int);
 int _set_gbRomBank(int bank);
 int _set_gbRamBank(int bank);
-int disable_gbRam(void);
 int _get_gbRomAddr(unsigned long addr, uint8_t *rdata);
 int _get_gbRamAddr(unsigned long addr, uint8_t *rdata);
 int _set_gbRamAddr(unsigned long addr, uint8_t *sdata);
-int copy_gbRom_toRAM(uint8_t *rom_data);
-int copy_gbRam_toRAM(uint8_t *ram_data);
-int copy_save_toGbRam(uint8_t *ram_data);
+
