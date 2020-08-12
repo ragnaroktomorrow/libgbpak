@@ -25,8 +25,15 @@ uint8_t data[32];
 cart gbcart;
 
 
-
-int copy_gbRom_toRAM(uint8_t *rom_data){
+/* 
+copies the Game Boy Cartridge ROM to the Flashcart SDRAM 
+ rom_data - existing buffer to accept rom data. assumed to be large enough.
+ bankOffset - pointer to ROM bank index offset to start reading from. Set to NULL to 
+  just read from the first bank. Will be updated with the next available, unread bank 
+  on return if provided. The function will return -1 if too large a value is provided.
+ size - the read is limited to the smaller of size and the total ROM size. leave as zero to read all ROM.
+*/
+int copy_gbRom_toRAM(uint8_t *rom_data, uint32_t *bankOffset, uint32_t size){
 
 	uint8_t rdata[32];
 
@@ -34,8 +41,27 @@ int copy_gbRom_toRAM(uint8_t *rom_data){
 	unsigned long sd_offset=0x00;
 	int tmp=0x00;
 
+    int bankc = 0;
+    if (bankOffset)
+    {   
+        if (*bankOffset >= gbcart.rombanks)
+        {
+            return -1;
+        }
+        bankc = *bankOffset;
+    }
+
+    //if provided, decides when to stop reading
+    int bankLimit = gbcart.rombanks;
+    if (size)
+    {
+        //convert bytes to read into a bank limit index
+        size = (size / BANKSIZE) + bankc;
+        bankLimit = size < gbcart.rombanks ? size : gbcart.rombanks;
+    }
+
 	//copy banks to sdram
-	for(int bankc=0; bankc < gbcart.rombanks; bankc++){ //bank count
+	for(; bankc < bankLimit; bankc++){ //bank count
 
 	//mbc1 exceptions
 	if(gbcart.mapper==GB_MBC1 && (bankc==0x20 || bankc==0x40 || bankc==0x60))
@@ -75,11 +101,8 @@ int copy_gbRom_toRAM(uint8_t *rom_data){
 
 					data_cache_hit_writeback_invalidate(rdata,32);
 
-					//write to cartspace
-					dma_write_s(rdata, 0xb2000000+sd_offset, 0x20); //upper 32mb
-
 					//write to rdram
-					//memcpy(rom_data+sd_offset,rdata,0x20);
+					memcpy(rom_data+sd_offset,rdata,0x20);
 					sd_offset+=0x20;
 
 				}
@@ -90,19 +113,18 @@ int copy_gbRom_toRAM(uint8_t *rom_data){
 			}
 	}
 
+    if (bankOffset) *bankOffset = bankc;
+
 	return 0;
 }
 
 
 
+/* copies a buffer to the Game Boy RAM */
 int copy_save_toGbRam(uint8_t *ram_data){
 
 	if(gbcart.ram!=TRUE)
 	return -1;
-
-	//security off for camera by now
-	//if(gbcart.mapper == GB_CAMERA)
-	//return -1;
 
 	//mbc1 - mbc3
 	//ram in 8KByte blocks up to 32Kb
@@ -113,7 +135,6 @@ int copy_save_toGbRam(uint8_t *ram_data){
 	//mbc5
 	//128KByte RAM
 
-
 	uint8_t rdata[32];
 
 	unsigned long addr=0xE000;
@@ -121,49 +142,51 @@ int copy_save_toGbRam(uint8_t *ram_data){
 	int tmp=0x00;
 
 	//copy rambanks to sdram
-	for(int bankc=0; bankc < gbcart.rambanks; bankc++){ //bank count
+	//for each bank...
+	for(int bankc=0; bankc < gbcart.rambanks; bankc++) //bank count
+	{ 
 
-	//get power status 0=off 1=on
-	if(_get_gbPower()!=1)
-	return -4;
+		//get power status 0=off 1=on
+		if(_get_gbPower()!=1) return -4;
 
-	//get access mode
-	int as=_get_gbAccessState();
+		//get access mode
+		int as=_get_gbAccessState();
 
-	tmp = _set_gbRamBank(bankc);
-	if(tmp!=0)
-	return -1;
+		tmp = _set_gbRamBank(bankc);
+		
+		if(tmp!=0) return -1;
 
-		int bank_width=0xFFE0;
-		if(gbcart.mapper == GB_MBC2)
-		bank_width=0xE1E0;
+			int bank_width=0xFFE0;
+			if(gbcart.mapper == GB_MBC2)
+			bank_width=0xE1E0;
 
-			for(unsigned long banko=addr; banko<=bank_width; banko+=0x20){ //bank offset
+		//for each offset in this bank...
+		for(unsigned long banko=addr; banko<=bank_width; banko+=0x20) //bank offset
+		{ 
+			//is FF the default for unset ram? does it matter?
+			memset( rdata, 0xFF, 32 );
+			//write to cartspace
+			data_cache_hit_writeback_invalidate(rdata,32);
 
+			memcpy(rdata, ram_data+ram_offset, 0x20);
+			data_cache_hit_writeback_invalidate(rdata,32);			
 
-					memset( rdata, 0xFF, 32 );
-					//write to cartspace
-					data_cache_hit_writeback_invalidate(rdata,32);
-					dma_read_s(rdata, 0xb2000000+ram_offset, 0x20); //upper 32mb
-					data_cache_hit_writeback_invalidate(rdata,32);
-				
+			//perform write to cart ram
+			if(_set_gbRamAddr(banko, rdata)==0){
 
-				if(_set_gbRamAddr(banko, rdata)==0){
-
-					ram_offset+=0x20;
-				}
-				else{
-					return -1;
-				}
+				ram_offset+=0x20;
 			}
+			else{
+				return -1;
+			}
+		}
 	}
 
 	return 0;
 }
 
-
-
-int copy_gbRam_toRAM(uint8_t *ram_data){
+/* copies the Game Boy RAM to the Flashcart SDRAM */
+int copy_gbRam_toRAM(uint8_t *ram_data){//parameter unused
 
 	if(gbcart.ram!=TRUE)
 	return -1;
@@ -186,10 +209,6 @@ int copy_gbRam_toRAM(uint8_t *ram_data){
 	//copy rambanks to sdram
 	for(int bankc=0; bankc < gbcart.rambanks; bankc++){ //bank count
 
-	//get power status 0=off 1=on
-	if(_get_gbPower()!=1)
-	return -4;
-
 	//get access mode
 	int as=_get_gbAccessState();
 
@@ -208,10 +227,9 @@ int copy_gbRam_toRAM(uint8_t *ram_data){
 				if(_get_gbRamAddr(banko, rdata)==0){
 
 					data_cache_hit_writeback_invalidate(rdata,32);
-					dma_write_s(rdata, 0xb2000000+sd_offset, 0x20); //upper 32mb
 
 					//to rdram
-					//memcpy(ram_data+sd_offset,rdata,0x20);
+					memcpy(ram_data+sd_offset,rdata,0x20);
 					sd_offset+=0x20;
 				}
 				else{
@@ -223,8 +241,7 @@ int copy_gbRam_toRAM(uint8_t *ram_data){
 	return 0;
 }
 
-
-
+/* enable/disable the 3v3 to 5v step up regulator */
 int _set_gbPower(int status){ //setstatus ???
 	//1=on 2=off
 
@@ -240,14 +257,14 @@ int _set_gbPower(int status){ //setstatus ???
 
 		memset( data, status, 32 );
 		value = write_mempak_address( 0, 0x8001, data );
-		sleep(200);
+		// sleep(200);
+		wait_ms(200);
 
 
 	return value;
 }
 
-
-//int get_gbPower(uint8_t *rdata){
+/* read out the status of the step up regulator */
 int _get_gbPower(void){ //checkstatus???
 
 	uint8_t rdata[32];
@@ -264,8 +281,6 @@ int _get_gbPower(void){ //checkstatus???
 	return value;
 }
 
-
-//int get_gbAccessState(uint8_t *rdata){
 int _get_gbAccessState(void){ //real: get power ????
 
 	uint8_t rdata[32];
@@ -296,8 +311,6 @@ int _get_gbAccessState(void){ //real: get power ????
 
 int _set_gbAccessState(int status){ //set power ????
 
-
-
 	if(status){
 		//mode 01
 		status=0x01;
@@ -313,7 +326,6 @@ int _set_gbAccessState(int status){ //set power ????
 
 	return value;
 }
-
 
 int disable_gbRam(void){
 
@@ -333,9 +345,8 @@ int disable_gbRam(void){
 	}
 
 
-return 0;
+    return 0;
 }
-
 
 int _set_gbRamBank(int bank){
 
@@ -392,7 +403,6 @@ int _set_gbRamBank(int bank){
 		//512x4bits RAM, built-in into the MBC2 chip
 		//only one bank?
 
-
 		memset(sdata, 0x00, 32);
 		value = write_mempak_address( 0, 0xA00C, sdata ); //prepare for ram enable
 
@@ -405,9 +415,8 @@ int _set_gbRamBank(int bank){
 	}
 
 
-return 0;
+    return 0;
 }
-
 
 int _set_gbRomBank(int bank){
 
@@ -472,7 +481,6 @@ int _set_gbRomBank(int bank){
 			//TODO: disable high bits
 
 		}
-
 
 		//lower bits
 		memset( sdata, 0x00, 32);
@@ -636,7 +644,6 @@ int _get_gbRamAddr(unsigned long addr, uint8_t *rdata){
 	return value;
 }
 
-
 int _set_gbRamAddr(unsigned long addr, uint8_t *sdata){
 
 	//mbc1,3,5 A000-BFFF
@@ -660,7 +667,6 @@ int _set_gbRamAddr(unsigned long addr, uint8_t *sdata){
 	return value;
 }
 
-
 int _get_gbRomAddr(unsigned long addr, uint8_t *rdata){
 
 	//addr e.g. 0xC138
@@ -674,7 +680,10 @@ int _get_gbRomAddr(unsigned long addr, uint8_t *rdata){
 	return value;
 }
 
-
+/*
+contains a large switch for cart type, toggling some traits like battery and rtc.
+responsible for pulling the title and other stats
+*/
 int init_gbpak(void){
 
 	memset( data, 0, 32 );
@@ -746,6 +755,7 @@ int init_gbpak(void){
 	 05h -   1MByte (64 banks)  - only 63 banks used by MBC1
 	 06h -   2MByte (128 banks) - only 125 banks used by MBC1 - 2048000=125*16*1024
 	 07h -   4MByte (256 banks)
+	 08h -   8MByte (512 banks)
 	 52h - 1.1MByte (72 banks)
 	 53h - 1.2MByte (80 banks)
 	 54h - 1.5MByte (96 banks) 1572864
@@ -761,6 +771,7 @@ int init_gbpak(void){
 		case 0x05: 	gbcart.rombanks=64;		break;
 		case 0x06:	gbcart.rombanks=128;	break;
 		case 0x07: 	gbcart.rombanks=256;	break;
+		case 0x08:  gbcart.rombanks=512;    break;
 		case 0x52: 	gbcart.rombanks=72;		break;
 		case 0x53: 	gbcart.rombanks=80;		break;
 		case 0x54: 	gbcart.rombanks=96;		break;
@@ -770,130 +781,130 @@ int init_gbpak(void){
 	//set romsize;
 	gbcart.romsize=gbcart.rombanks*BANKSIZE;
 
-
+	/* Some of these seem to be set incorrectly */
 	//0x147 cartridge type
 	switch (data[7]) {
-	case 0x00:
+	case 0x00: //ROM Only
 		gbcart.mapper = GB_NORM;
 		gbcart.ram = FALSE;
 		gbcart.battery = FALSE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x01:
+	case 0x01: //MBC1
 		gbcart.mapper = GB_MBC1;
 		gbcart.ram = FALSE;
 		gbcart.battery = FALSE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x02:
+	case 0x02: //MBC1 + RAM
 		gbcart.mapper = GB_MBC1;
 		gbcart.ram = TRUE;
 		gbcart.battery = FALSE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x03:
+	case 0x03: //MBC1 + RAM + Battery
 		gbcart.mapper = GB_MBC1;
 		gbcart.ram = TRUE;
 		gbcart.battery = TRUE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x05:
+	case 0x05: //MBC2
 		gbcart.mapper = GB_MBC2;
 		gbcart.ram = FALSE;
 		gbcart.battery = FALSE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x06:
+	case 0x06: //MBC + RAM + Battery
 		gbcart.mapper = GB_MBC2;
 		gbcart.ram = TRUE; //internal ram
 		gbcart.battery = TRUE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x08:
+	case 0x08: //ROM + RAM (no mapper chip?)
 		gbcart.mapper = GB_NORM;
 		gbcart.ram = TRUE;
 		gbcart.battery = FALSE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x09:
+	case 0x09: //ROM + RAM + Battery
 		gbcart.mapper = GB_NORM;
 		gbcart.ram = TRUE;
 		gbcart.battery = TRUE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x0B:
+	case 0x0B: //MMM01 (multi-cart)
 		gbcart.mapper = GB_MMMO1;
 		gbcart.ram = FALSE;
 		gbcart.battery = FALSE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x0C:
+	case 0x0C: //MMM01 + RAM
 		gbcart.mapper = GB_MMMO1;
 		gbcart.ram = TRUE;
 		gbcart.battery = FALSE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x0D:
+	case 0x0D: //MMM01 + RAM + Battery
 		gbcart.mapper = GB_MMMO1;
 		gbcart.ram = TRUE;
 		gbcart.battery = TRUE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x0F:
+	case 0x0F: //MBC3 + Timer + Battery
 		gbcart.mapper = GB_MBC3;
 		gbcart.ram = FALSE;
 		gbcart.battery = TRUE;
 		gbcart.rtc = TRUE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x10:
+	case 0x10: //MBC3 + RAM + Timer + Battery
 		gbcart.mapper = GB_MBC3;
 		gbcart.ram = TRUE;
 		gbcart.battery = TRUE;
 		gbcart.rtc = TRUE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x11:
+	case 0x11: //MBC3
 		gbcart.mapper = GB_MBC3;
 		gbcart.ram = FALSE;
 		gbcart.battery = FALSE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x12:
+	case 0x12: //MBC3 + RAM
 		gbcart.mapper = GB_MBC3;
 		gbcart.ram = TRUE;
 		gbcart.battery = TRUE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x13:
+	case 0x13: //MBC3 + RAM + Battery
 		gbcart.mapper = GB_MBC3;
 		gbcart.ram = TRUE;
 		gbcart.battery = TRUE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-		//experimental
-	case 0x15:
+//experimental start (aka doesn't exist...)
+	case 0x15: 
 		gbcart.mapper = GB_MBC4;
 		gbcart.ram = FALSE;
 		gbcart.battery = FALSE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x16:
+	case 0x16: 
 		gbcart.mapper = GB_MBC4;
 		gbcart.ram = TRUE;
 		gbcart.battery = FALSE;
@@ -907,49 +918,51 @@ int init_gbpak(void){
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-		//experimental end
-	case 0x19:
+//experimental end
+	case 0x19: //MBC5
 		gbcart.mapper = GB_MBC5;
 		gbcart.ram = FALSE;
 		gbcart.battery = FALSE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x1A:
+	case 0x1A: //MBC5 + RAM
 		gbcart.mapper = GB_MBC5;
 		gbcart.ram = TRUE;
 		gbcart.battery = FALSE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x1B:
+	case 0x1B: //MBC5 + RAM + Battery
 		gbcart.mapper = GB_MBC5;
 		gbcart.ram = TRUE;
 		gbcart.battery = TRUE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-	case 0x1C:
+	case 0x1C: //MBC5 + Rumble
 		gbcart.mapper = GB_MBC5;
 		gbcart.ram = FALSE;
 		gbcart.battery = FALSE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = TRUE;
 		break;
-	case 0x1D:
+	case 0x1D: //MBC5 + RAM + Rumble
 		gbcart.mapper = GB_MBC5;
 		gbcart.ram = TRUE;
 		gbcart.battery = FALSE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = TRUE;
 		break;
-	case 0x1E:
+	case 0x1E: //MBC5 + RAM + Battery + Rumble
 		gbcart.mapper = GB_MBC5;
 		gbcart.ram = TRUE;
 		gbcart.battery = TRUE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = TRUE;
 		break;
+	//case 0x20: //MBC6 + RAM + Battery
+	//case 0x22: //MBC7 + RAM + Battery + Accelerometer
 	case 0xFC: //camera
 		gbcart.mapper = GB_CAMERA;
 		gbcart.ram = TRUE;
@@ -957,28 +970,28 @@ int init_gbpak(void){
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-
-		//experimental
-	case 0xFF:
+	//case 0xFD: TAMA5
+	//case 0xFE: HUC3
+//experimental
+	case 0xFF: //HUC1 + RAM + Battery
 		gbcart.mapper = GB_HUC1;
 		gbcart.ram = TRUE;
 		gbcart.battery = TRUE;
 		gbcart.rtc = FALSE;
 		gbcart.rumble = FALSE;
 		break;
-		//experimental end
+//experimental end
 
 	default:
 		return FALSE;
 	}
-
-
 
 		// 00h - None
 		// 01h - 2 KBytes
 		// 02h - 8 Kbytes
 		// 03h - 32 KBytes (4 banks of 8KBytes each)
 		// 04h - 128 KBytes (16 banks of 8KBytes each) - only camera?
+		// 05h - 64KB - 8 banks of 8 KB (Japanese Pokemon Crystal only?)
 
 		switch (gbcart._ramsize) {
 		case 0x00:
@@ -999,21 +1012,20 @@ int init_gbpak(void){
 		case 0x02: 	gbcart.rambanks=1;
 					gbcart.ramsize=8*1024;
 					break;
-		case 0x03: 	 gbcart.rambanks=4;
+		case 0x03: 	gbcart.rambanks=4;
 					gbcart.ramsize=4*8*1024;
 					break;
 
 		case 0x04: 	gbcart.rambanks=16;
 					gbcart.ramsize=16*8*1024;
 					break;
+		case 0x05:  gbcart.rambanks=8;
+					gbcart.ramsize=8*8*1024;
+					break;
 
 		default: 	gbcart.rambanks=0;
 					gbcart.ramsize=0;
 		}
-
-
-
-
 
 	return 0;
 }
